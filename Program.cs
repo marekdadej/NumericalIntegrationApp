@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
 
 namespace NumericalIntegration
 {
@@ -16,11 +17,22 @@ namespace NumericalIntegration
             var intervalManager = new IntervalManager();
             var intervals = intervalManager.GetIntervals();
 
-            var cts = new CancellationTokenSource();
-            var integralCalculator = new IntegralCalculator();
+            Console.WriteLine("Wybierz metodę przetwarzania:");
+            Console.WriteLine("1: TPL");
+            Console.WriteLine("2: Thread");
+            Console.WriteLine("3: ThreadPool");
+            int methodChoice = int.Parse(Console.ReadLine());
 
-            var tasks = intervals.Select(interval =>
-                Task.Run(() => integralCalculator.Calculate(selectedFunction, selectedFunctionName, interval, cts.Token), cts.Token)).ToList();
+            IProcessingMethod processingMethod = methodChoice switch
+            {
+                1 => new TPLProcessingMethod(),
+                2 => new ThreadProcessingMethod(),
+                3 => new ThreadPoolProcessingMethod(),
+                _ => throw new InvalidOperationException("Nieprawidłowy wybór.")
+            };
+
+            var cts = new CancellationTokenSource();
+            var stopwatch = Stopwatch.StartNew();
 
             Console.WriteLine("Naciśnij 'q', aby przerwać obliczenia.");
             Task.Run(() =>
@@ -37,29 +49,85 @@ namespace NumericalIntegration
 
             try
             {
-                Task.WaitAll(tasks.ToArray());
-
-                Console.WriteLine("\nPodsumowanie obliczeń:");
-                foreach (var task in tasks)
-                {
-                    if (task.IsCompletedSuccessfully)
-                    {
-                        var (result, summary) = task.Result;
-                        Console.WriteLine($"{summary} Wynik: {result:F4}");
-                    }
-                }
+                processingMethod.Process(selectedFunction, selectedFunctionName, intervals, cts);
             }
-            catch (AggregateException ex)
+            catch (OperationCanceledException)
             {
-                if (ex.InnerExceptions.Any(e => e is OperationCanceledException))
+                Console.WriteLine("Obliczenia zostały anulowane.");
+            }
+
+            stopwatch.Stop();
+            Console.WriteLine($"Całkowity czas wykonania: {stopwatch.Elapsed}");
+        }
+    }
+
+    public interface IProcessingMethod
+    {
+        void Process(IFunction function, string functionName, List<(double a, double b, int n)> intervals, CancellationTokenSource cts);
+    }
+
+    public class TPLProcessingMethod : IProcessingMethod
+    {
+        public void Process(IFunction function, string functionName, List<(double a, double b, int n)> intervals, CancellationTokenSource cts)
+        {
+            var tasks = intervals.Select(interval =>
+                Task.Run(() => new IntegralCalculator().Calculate(function, functionName, interval, cts.Token), cts.Token)).ToList();
+
+            Task.WaitAll(tasks.ToArray());
+            Console.WriteLine("\nPodsumowanie obliczeń TPL:");
+            foreach (var task in tasks)
+            {
+                if (task.IsCompletedSuccessfully)
                 {
-                    Console.WriteLine("Obliczenia zostały anulowane.");
-                }
-                else
-                {
-                    Console.WriteLine("Wystąpił błąd: " + ex.Message);
+                    var (result, summary) = task.Result;
+                    Console.WriteLine($"{summary} Wynik: {result:F4}");
                 }
             }
+        }
+    }
+
+    public class ThreadProcessingMethod : IProcessingMethod
+    {
+        public void Process(IFunction function, string functionName, List<(double a, double b, int n)> intervals, CancellationTokenSource cts)
+        {
+            var threads = new List<Thread>();
+            foreach (var interval in intervals)
+            {
+                var thread = new Thread(() =>
+                {
+                    var (result, summary) = new IntegralCalculator().Calculate(function, functionName, interval, cts.Token);
+                    Console.WriteLine($"{summary} Wynik: {result:F4}");
+                });
+                threads.Add(thread);
+                thread.Start();
+            }
+
+            foreach (var thread in threads)
+            {
+                thread.Join();
+            }
+        }
+    }
+
+    public class ThreadPoolProcessingMethod : IProcessingMethod
+    {
+        public void Process(IFunction function, string functionName, List<(double a, double b, int n)> intervals, CancellationTokenSource cts)
+        {
+            var waitHandles = new List<ManualResetEvent>();
+            foreach (var interval in intervals)
+            {
+                var resetEvent = new ManualResetEvent(false);
+                waitHandles.Add(resetEvent);
+
+                ThreadPool.QueueUserWorkItem(state =>
+                {
+                    var (result, summary) = new IntegralCalculator().Calculate(function, functionName, interval, cts.Token);
+                    Console.WriteLine($"{summary} Wynik: {result:F4}");
+                    resetEvent.Set();
+                });
+            }
+
+            WaitHandle.WaitAll(waitHandles.ToArray());
         }
     }
 
@@ -165,7 +233,7 @@ namespace NumericalIntegration
                     Console.WriteLine($"[Przedział {a}-{b}] Postęp: {(double)i / n:P0}");
                 }
                 sum += f.Evaluate(a + i * h);
-                Thread.Sleep(10); 
+                Thread.Sleep(10);
             }
 
             string summary = $"Funkcja: {functionName}, Przedział: [{a}, {b}], Metoda: trapezy, Podziały: {n}.";
